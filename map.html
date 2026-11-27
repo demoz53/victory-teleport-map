@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Teleport Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#14161c; --panel:#1d2029; --text:#e8e9ee; --muted:#9aa0ad; --accent:#ff5fa2; --ok:#4ad08a; --bad:#ff6b6b; --line:#2c303b; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:14px/1.4 system-ui, Segoe UI, sans-serif; }
+  #app { display:flex; height:100%; }
+  #side { width:290px; flex:none; background:var(--panel); border-right:1px solid var(--line); padding:12px; overflow:auto; box-sizing:border-box; }
+  #map { flex:1; background:#4891a8; }
+  h1 { font-size:16px; margin:0 0 8px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .row { display:flex; gap:6px; margin:6px 0; align-items:center; }
+  input[type=text] { flex:1; min-width:0; background:#11131a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+  button { background:#2a2e3a; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#1a0b12; font-weight:600; }
+  .section { border-top:1px solid var(--line); margin-top:12px; padding-top:10px; }
+  #state.live { color:var(--ok); } #state.dead { color:var(--bad); }
+  #places button { display:block; width:100%; text-align:left; margin:4px 0; }
+  #log { font:12px ui-monospace, Consolas, monospace; color:var(--muted); white-space:pre-wrap; max-height:140px; overflow:auto; }
+  #cursor { position:absolute; z-index:1000; right:10px; bottom:24px; background:rgba(20,22,28,.85); padding:4px 8px; border-radius:6px; font:12px ui-monospace, Consolas, monospace; pointer-events:none; }
+  .me { width:26px; height:26px; }
+  .me svg { width:26px; height:26px; filter: drop-shadow(0 0 2px #000); }
+  .leaflet-popup-content { font:13px system-ui, sans-serif; }
+  .leaflet-popup-content button { margin-top:6px; }
+  @media (max-width: 700px) { #app { flex-direction:column; } #side { width:100%; max-height:45%; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>Teleport map</h1>
+    <div class="muted">Click the map, then Teleport. The game finds the ground unless you give a height.</div>
+    <div class="row"><span>Game:</span><span id="state" class="dead">checking...</span></div>
+    <div class="row"><span>You:</span><span id="me">-</span></div>
+    <div class="row">
+      <button id="center">Center on me</button>
+      <label class="muted"><input type="checkbox" id="follow"> follow</label>
+    </div>
+
+    <div class="section">
+      <div class="muted">Teleport to coordinates (x y, optional height z)</div>
+      <div class="row"><input type="text" id="coords" placeholder="-2353.3 -5534.4 7"><button class="primary" id="go">Teleport</button></div>
+      <div class="row"><button id="show">Show on map</button><span class="muted">height for clicks:</span><input type="text" id="height" placeholder="auto" style="max-width:56px"></div>
+    </div>
+
+    <div class="section">
+      <div class="muted">Places</div>
+      <div id="places"></div>
+    </div>
+
+    <div class="section">
+      <div class="row"><span class="muted">Map:</span><button id="day">Day</button><button id="night">Night</button></div>
+      <div class="muted">Map imagery: Rockstar Games, tiles from jeanropke's GTA VI map.</div>
+    </div>
+
+    <div class="section">
+      <div class="muted">Sent</div>
+      <div id="log"></div>
+    </div>
+  </div>
+  <div id="map"></div>
+</div>
+<div id="cursor">x -, y -</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const KEY = "__KEY__";
+// The community map's game-world projection (game x, y in metres; +y north).
+const R = { baseZoom: 8, origin: [127, 127], left: -15872, top: 13312, size: 24576 };
+function gameToLatLng(x, y) {
+  const n = 2 ** R.baseZoom;
+  const mx = (R.origin[0] + (x - R.left) / R.size) / n;
+  const my = (R.origin[1] + (R.top - y) / R.size) / n;
+  return L.latLng(Math.atan(Math.sinh(Math.PI * (1 - 2 * my))) * 180 / Math.PI, mx * 360 - 180);
+}
+function latLngToGame(ll) {
+  const n = 2 ** R.baseZoom;
+  const my = (1 - Math.asinh(Math.tan(ll.lat * Math.PI / 180)) / Math.PI) / 2;
+  return [R.left + ((ll.lng + 180) / 360 * n - R.origin[0]) * R.size, R.top - (my * n - R.origin[1]) * R.size];
+}
+const fmt = v => v.toFixed(1);
+
+const bounds = L.latLngBounds([[0, -1.40625], [1.4061088354351563, 0]]);
+const map = L.map('map', { minZoom: 8, maxZoom: 19, maxBounds: bounds.pad(0.2), zoomSnap: 0.5, attributionControl: true });
+const tileOpts = { minZoom: 8, maxZoom: 19, maxNativeZoom: 17, bounds, noWrap: true,
+  attribution: 'Map imagery: Rockstar Games | tiles: jeanropke GTAVIMap' };
+const CDN = 'https://map-tiles.b-cdn.net/assets/gtavi/';
+const layers = { day: L.tileLayer(CDN + 'day/{z}/{x}_{y}.jpg', tileOpts), night: L.tileLayer(CDN + 'night/{z}/{x}_{y}.jpg', tileOpts) };
+let current = layers.day.addTo(map);
+function useLayer(k) { if (current !== layers[k]) { map.removeLayer(current); current = layers[k].addTo(map); } }
+document.getElementById('day').onclick = () => useLayer('day');
+document.getElementById('night').onclick = () => useLayer('night');
+map.setView(gameToLatLng(-2353.3, -5534.4), 15);
+
+const cursor = document.getElementById('cursor');
+map.on('mousemove', e => { const [x, y] = latLngToGame(e.latlng); cursor.textContent = `x ${fmt(x)}, y ${fmt(y)}`; });
+
+const logEl = document.getElementById('log');
+function log(s) { const t = new Date().toLocaleTimeString(); logEl.textContent = `${t} ${s}\n` + logEl.textContent; }
+
+async function teleport(x, y, z) {
+  const body = { x, y }; if (z !== undefined && z !== null && z !== '' && !isNaN(z)) body.z = Number(z);
+  try {
+    const r = await fetch('/teleport', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Key': KEY }, body: JSON.stringify(body) });
+    const j = await r.json();
+    log(j.ok ? `sent: ${j.line}` : `NOT sent: ${j.error || r.status}`);
+  } catch (e) { log('NOT sent: the map server is not running'); }
+}
+function clickHeight() { const h = document.getElementById('height').value.trim(); return h === '' ? undefined : Number(h); }
+
+const pick = L.circleMarker([0, 0], { radius: 6, color: '#ff5fa2', weight: 2, fillOpacity: 0.4 });
+function showPick(x, y) {
+  const ll = gameToLatLng(x, y);
+  pick.setLatLng(ll).addTo(map);
+  const div = document.createElement('div');
+  div.innerHTML = `<b>x ${fmt(x)}, y ${fmt(y)}</b><br>`;
+  const b = document.createElement('button'); b.textContent = 'Teleport here'; b.className = 'primary';
+  b.onclick = () => { teleport(x, y, clickHeight()); map.closePopup(); };
+  const c = document.createElement('button'); c.textContent = 'Copy'; c.style.marginLeft = '6px';
+  c.onclick = () => navigator.clipboard && navigator.clipboard.writeText(`${fmt(x)} ${fmt(y)}`);
+  div.append(b, c);
+  L.popup({ offset: [0, -4] }).setLatLng(ll).setContent(div).openOn(map);
+}
+map.on('click', e => { const [x, y] = latLngToGame(e.latlng); showPick(x, y); });
+
+function parseCoords() {
+  const p = document.getElementById('coords').value.trim().split(/[\s,]+/).map(Number);
+  return p.length >= 2 && p.slice(0, 3).every(v => !isNaN(v)) ? p : null;
+}
+document.getElementById('go').onclick = () => { const p = parseCoords(); if (!p) return log('type: x y [z]'); teleport(p[0], p[1], p[2]); map.panTo(gameToLatLng(p[0], p[1])); };
+document.getElementById('show').onclick = () => { const p = parseCoords(); if (!p) return log('type: x y [z]'); map.setView(gameToLatLng(p[0], p[1]), Math.max(map.getZoom(), 15)); showPick(p[0], p[1]); };
+
+const PLACES = [
+  ['Jason\'s house (bed)', -2353.31, -5534.35, 7.0],
+  ['Beside the house', -2357.4, -5525.4, 3.0],
+  ['Water\'s edge', -2368.0, -5530.9, 3.3],
+  ['The deck', -2355.6, -5526.3, 7.2],
+  ['Club NINE1NINE', -679.48, 490.71, 7.66],
+  ['Vice City marina (0, 0)', 0, 0, undefined],
+];
+const placesEl = document.getElementById('places');
+for (const [name, x, y, z] of PLACES) {
+  const b = document.createElement('button'); b.textContent = name;
+  b.onclick = () => { map.setView(gameToLatLng(x, y), Math.max(map.getZoom(), 16)); showPick(x, y); };
+  placesEl.append(b);
+  L.circleMarker(gameToLatLng(x, y), { radius: 4, color: '#ffd166', weight: 1, fillOpacity: 0.8 }).bindTooltip(name).addTo(map);
+}
+
+// Links: #x,y[,zoom][,pin][,night] centers the map on game x, y; pin also opens the teleport popup.
+function fromHash() {
+  const parts = decodeURIComponent(location.hash.slice(1)).split(',').map(t => t.trim()).filter(t => t !== '');
+  const nums = parts.filter(t => !isNaN(Number(t))).map(Number);
+  if (parts.includes('night')) useLayer('night');
+  if (nums.length >= 2) {
+    map.setView(gameToLatLng(nums[0], nums[1]), nums.length > 2 ? nums[2] : 16);
+    if (parts.includes('pin')) showPick(nums[0], nums[1]);
+  }
+}
+fromHash();
+window.addEventListener('hashchange', fromHash);
+
+const meIcon = L.divIcon({ className: 'me', iconSize: [26, 26], iconAnchor: [13, 13],
+  html: '<svg viewBox="0 0 26 26"><circle cx="13" cy="13" r="11" fill="#1d2029" stroke="#fff" stroke-width="2"/><path d="M13 4 L19 19 L13 15.5 L7 19 Z" fill="#ff5fa2"/></svg>' });
+const me = L.marker([0, 0], { icon: meIcon, interactive: false, zIndexOffset: 1000 });
+let mePos = null;
+const stateEl = document.getElementById('state'), meEl = document.getElementById('me');
+async function poll() {
+  try {
+    const s = await (await fetch('/status', { cache: 'no-store' })).json();
+    stateEl.textContent = s.demo ? 'demo (no game)' : s.live ? 'running' : 'not running';
+    stateEl.className = s.live ? 'live' : 'dead';
+    if (s.x !== undefined && s.y !== undefined) {
+      mePos = gameToLatLng(s.x, s.y);
+      me.setLatLng(mePos).addTo(map);
+      const svg = me.getElement() && me.getElement().querySelector('svg');
+      if (svg && s.heading_deg !== undefined) svg.style.transform = `rotate(${-s.heading_deg}deg)`;
+      meEl.textContent = `${fmt(s.x)}, ${fmt(s.y)}, ${s.z !== undefined ? fmt(s.z) : '?'}${s.in_vehicle ? ' (vehicle)' : ''}`;
+      if (document.getElementById('follow').checked) map.panTo(mePos, { animate: false });
+    }
+  } catch (e) { stateEl.textContent = 'map server stopped'; stateEl.className = 'dead'; }
+}
+document.getElementById('center').onclick = () => { if (mePos) map.setView(mePos, Math.max(map.getZoom(), 16)); };
+poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>
