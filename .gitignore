@@ -3,3 +3,5 @@ __pycache__/
 # your own command and status files, if you keep them here
 *-mod.txt
 *-status.txt
+# the offline copy (map imagery and the community map data): for your own use, never committed
+offline/

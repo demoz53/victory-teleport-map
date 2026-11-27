@@ -10,6 +10,9 @@ the rest.
     python modmap.py --mod-file <mod.txt> --status-file <status.txt> [--port 8766] [--open]
     python modmap.py --demo [--open]        # try the page without the game
 
+Offline: after `python download_offline.py` has saved a copy of the map, tiles, markers, icons and Leaflet
+into the `offline` folder, this server uses that copy and the page needs no internet (--online forces the web).
+
 Safety: it listens on 127.0.0.1 only, accepts only teleport commands made of numbers, and only
 with the random key written into the page it serves, so another web page cannot send commands.
 Python 3.8 or later, standard library only.
@@ -24,11 +27,28 @@ import socketserver
 import sys
 import threading
 import time
+import urllib.parse
 import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEY = secrets.token_hex(16)
 STALE_S = 5.0  # the game rewrites the status file twice a second
+LEAFLET_CDN = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/"
+TYPES = {".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json", ".js": "text/javascript", ".css": "text/css"}
+
+
+def offline_config(folder):
+    """The page settings for a finished offline copy in `folder`, or None when there is none."""
+    try:
+        with open(os.path.join(folder, "manifest.json"), encoding="utf-8") as f:
+            man = json.load(f)
+        layers = [l for l in man.get("layers", []) if l in ("day", "night")]
+        if not layers:
+            return None
+        return {"tiles": "/offline/tiles/", "data": "/offline/", "maxNativeZoom": int(man.get("maxZoom", 14)),
+                "layers": layers, "offline": True}
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def read_status(path):
@@ -73,8 +93,11 @@ class Demo:
             self.z = vals[2] if len(vals) > 2 else 0.0
 
 
-def make_handler(mod_file, status_file, demo):
+def make_handler(mod_file, status_file, demo, offline_dir=None, cfg=None):
     page = open(os.path.join(HERE, "map.html"), encoding="utf-8").read().replace("__KEY__", KEY)
+    if cfg:
+        page = page.replace(LEAFLET_CDN, "/offline/leaflet/").replace("/*CONFIG*/{}", json.dumps(cfg))
+    root = os.path.realpath(offline_dir) if cfg else None
     status = demo.status if demo else (lambda: read_status(status_file))
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -90,6 +113,21 @@ def make_handler(mod_file, status_file, demo):
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_file(self, rel):
+            # Only files inside the offline folder, only the kinds the page uses.
+            full = os.path.realpath(os.path.join(root, *urllib.parse.unquote(rel).split("/")))
+            ctype = TYPES.get(os.path.splitext(full)[1].lower())
+            if not ctype or not full.startswith(root + os.sep) or not os.path.isfile(full):
+                return self._send(404, "{}")
+            with open(full, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
+
         def _host_ok(self):
             host = (self.headers.get("Host") or "").split(":")[0]
             return host in ("127.0.0.1", "localhost")
@@ -102,6 +140,8 @@ def make_handler(mod_file, status_file, demo):
                 return self._send(200, page, "text/html")
             if path == "/status":
                 return self._send(200, json.dumps(status()))
+            if root and path.startswith("/offline/"):
+                return self._send_file(path[len("/offline/"):])
             return self._send(404, "{}")
 
         def do_POST(self):
@@ -151,12 +191,16 @@ def main():
     ap.add_argument("--port", type=int, default=8766)
     ap.add_argument("--open", action="store_true", help="open the page in the default browser")
     ap.add_argument("--demo", action="store_true", help="no game: a pretend player that jumps where you teleport")
+    ap.add_argument("--offline-dir", default=os.path.join(HERE, "offline"), help="the offline copy (default: ./offline)")
+    ap.add_argument("--online", action="store_true", help="load the map from the web even when an offline copy exists")
     a = ap.parse_args()
     if not a.demo and not (a.mod_file and a.status_file):
         ap.error("--mod-file and --status-file are needed (or --demo)")
-    srv = Server(("127.0.0.1", a.port), make_handler(a.mod_file, a.status_file, Demo() if a.demo else None))
+    cfg = None if a.online else offline_config(a.offline_dir)
+    srv = Server(("127.0.0.1", a.port), make_handler(a.mod_file, a.status_file, Demo() if a.demo else None, a.offline_dir, cfg))
     url = f"http://127.0.0.1:{a.port}/"
-    print(f"teleport map at {url}" + (" (demo, no game)" if a.demo else f" (mod file {a.mod_file})"), flush=True)
+    print(f"teleport map at {url}" + (" (demo, no game)" if a.demo else f" (mod file {a.mod_file})")
+          + (f"; offline copy, zoom up to {cfg['maxNativeZoom']}" if cfg else "; map from the web"), flush=True)
     if a.open:
         webbrowser.open(url)
     try:

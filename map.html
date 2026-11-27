@@ -28,6 +28,14 @@
   .me svg { width:26px; height:26px; filter: drop-shadow(0 0 2px #000); }
   .leaflet-popup-content { font:13px system-ui, sans-serif; }
   .leaflet-popup-content button { margin-top:6px; }
+  #results button { display:block; width:100%; text-align:left; margin:3px 0; padding:4px 8px; font-size:13px; }
+  .sub { display:block; color:var(--muted); font-size:11px; }
+  #mk-groups { max-height:240px; overflow:auto; margin-top:4px; }
+  #mk-groups label { display:flex; gap:6px; align-items:center; font-size:13px; margin:2px 0; }
+  #mk-groups .n { color:var(--muted); font-size:11px; margin-left:auto; }
+  .swatch { width:9px; height:9px; border-radius:50%; flex:none; border:1px solid #111; }
+  details summary { cursor:pointer; margin-top:6px; }
+  .leaflet-popup-content .sub { margin-bottom:2px; }
   @media (max-width: 700px) { #app { flex-direction:column; } #side { width:100%; max-height:45%; } }
 </style>
 </head>
@@ -50,13 +58,23 @@
     </div>
 
     <div class="section">
+      <div class="row"><label><input type="checkbox" id="mk-on" checked> Map markers</label><span class="muted" id="mk-count">loading...</span></div>
+      <div class="row"><input type="text" id="search" placeholder="Search: gun store, safe, golf, a district"></div>
+      <div id="results"></div>
+      <details><summary class="muted">Marker types</summary>
+        <div class="row"><button id="mk-all">All</button><button id="mk-none">None</button><button id="mk-default">Default</button></div>
+        <div id="mk-groups"></div>
+      </details>
+    </div>
+
+    <div class="section">
       <div class="muted">Places</div>
       <div id="places"></div>
     </div>
 
     <div class="section">
       <div class="row"><span class="muted">Map:</span><button id="day">Day</button><button id="night">Night</button></div>
-      <div class="muted">Map imagery: Rockstar Games, tiles from jeanropke's GTA VI map.</div>
+      <div class="muted">Map imagery: Rockstar Games. Tiles, markers and names from jeanropke's GTA VI map.<span id="source"></span></div>
     </div>
 
     <div class="section">
@@ -71,6 +89,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 const KEY = "__KEY__";
+// Where the map, markers and names come from. modmap.py replaces the {} with its offline copy's paths.
+const CFG = Object.assign({ tiles: 'https://map-tiles.b-cdn.net/assets/gtavi/', data: 'https://jeanropke.github.io/GTAVIMap/',
+  maxNativeZoom: 17, layers: ['day', 'night'], offline: false }, /*CONFIG*/{});
 // The community map's game-world projection (game x, y in metres; +y north).
 const R = { baseZoom: 8, origin: [127, 127], left: -15872, top: 13312, size: 24576 };
 function gameToLatLng(x, y) {
@@ -85,15 +106,18 @@ function latLngToGame(ll) {
   return [R.left + ((ll.lng + 180) / 360 * n - R.origin[0]) * R.size, R.top - (my * n - R.origin[1]) * R.size];
 }
 const fmt = v => v.toFixed(1);
+const esc = t => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const bounds = L.latLngBounds([[0, -1.40625], [1.4061088354351563, 0]]);
 const map = L.map('map', { minZoom: 8, maxZoom: 19, maxBounds: bounds.pad(0.2), zoomSnap: 0.5, attributionControl: true });
-const tileOpts = { minZoom: 8, maxZoom: 19, maxNativeZoom: 17, bounds, noWrap: true,
+const tileOpts = { minZoom: 8, maxZoom: 19, maxNativeZoom: CFG.maxNativeZoom, bounds, noWrap: true,
   attribution: 'Map imagery: Rockstar Games | tiles: jeanropke GTAVIMap' };
-const CDN = 'https://map-tiles.b-cdn.net/assets/gtavi/';
-const layers = { day: L.tileLayer(CDN + 'day/{z}/{x}_{y}.jpg', tileOpts), night: L.tileLayer(CDN + 'night/{z}/{x}_{y}.jpg', tileOpts) };
-let current = layers.day.addTo(map);
-function useLayer(k) { if (current !== layers[k]) { map.removeLayer(current); current = layers[k].addTo(map); } }
+const layers = {};
+for (const k of CFG.layers) layers[k] = L.tileLayer(CFG.tiles + k + '/{z}/{x}_{y}.jpg', tileOpts);
+let current = layers[CFG.layers[0]].addTo(map);
+for (const k of ['day', 'night']) if (!layers[k]) document.getElementById(k).style.display = 'none';
+if (CFG.offline) document.getElementById('source').textContent = ' Offline copy, detail up to zoom ' + CFG.maxNativeZoom + '.';
+function useLayer(k) { if (layers[k] && current !== layers[k]) { map.removeLayer(current); current = layers[k].addTo(map); } }
 document.getElementById('day').onclick = () => useLayer('day');
 document.getElementById('night').onclick = () => useLayer('night');
 map.setView(gameToLatLng(-2353.3, -5534.4), 15);
@@ -115,18 +139,26 @@ async function teleport(x, y, z) {
 function clickHeight() { const h = document.getElementById('height').value.trim(); return h === '' ? undefined : Number(h); }
 
 const pick = L.circleMarker([0, 0], { radius: 6, color: '#ff5fa2', weight: 2, fillOpacity: 0.4 });
-function showPick(x, y) {
-  const ll = gameToLatLng(x, y);
+// A spot: {x, y, z?, tz?, name?, sub?}. tz is the height a teleport uses (none: the game finds the ground).
+function showSpot(s) {
+  const ll = gameToLatLng(s.x, s.y);
   pick.setLatLng(ll).addTo(map);
   const div = document.createElement('div');
-  div.innerHTML = `<b>x ${fmt(x)}, y ${fmt(y)}</b><br>`;
-  const b = document.createElement('button'); b.textContent = 'Teleport here'; b.className = 'primary';
-  b.onclick = () => { teleport(x, y, clickHeight()); map.closePopup(); };
-  const c = document.createElement('button'); c.textContent = 'Copy'; c.style.marginLeft = '6px';
-  c.onclick = () => navigator.clipboard && navigator.clipboard.writeText(`${fmt(x)} ${fmt(y)}`);
-  div.append(b, c);
+  const add = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = text; div.append(e); return e; };
+  add('b', '', s.name || `x ${fmt(s.x)}, y ${fmt(s.y)}`);
+  if (s.sub) add('span', 'sub', s.sub);
+  if (s.name) add('span', 'sub', `x ${fmt(s.x)}, y ${fmt(s.y)}` + (s.z !== undefined ? `, z ${fmt(s.z)}` : ''));
+  const btn = (text, cls, fn) => { const b = add('button', cls, text); b.style.marginRight = '6px'; b.onclick = () => { fn(); map.closePopup(); }; };
+  if (s.tz !== undefined) {
+    btn('Teleport here', 'primary', () => teleport(s.x, s.y, s.tz));
+    btn('On the ground', '', () => teleport(s.x, s.y));
+  } else {
+    btn('Teleport here', 'primary', () => teleport(s.x, s.y, clickHeight()));
+  }
+  btn('Copy', '', () => navigator.clipboard && navigator.clipboard.writeText(`${fmt(s.x)} ${fmt(s.y)}` + (s.z !== undefined ? ` ${fmt(s.z)}` : '')));
   L.popup({ offset: [0, -4] }).setLatLng(ll).setContent(div).openOn(map);
 }
+function showPick(x, y) { showSpot({ x, y }); }
 map.on('click', e => { const [x, y] = latLngToGame(e.latlng); showPick(x, y); });
 
 function parseCoords() {
@@ -145,18 +177,145 @@ const PLACES = [
   ['Vice City marina (0, 0)', 0, 0, undefined],
 ];
 const placesEl = document.getElementById('places');
-for (const [name, x, y, z] of PLACES) {
-  const b = document.createElement('button'); b.textContent = name;
-  b.onclick = () => { map.setView(gameToLatLng(x, y), Math.max(map.getZoom(), 16)); showPick(x, y); };
+const PLACE_SPOTS = PLACES.map(([name, x, y, z]) => ({ name, x, y, z, tz: z, sub: 'Saved place' }));
+function goTo(s) { map.setView(gameToLatLng(s.x, s.y), Math.max(map.getZoom(), 16)); showSpot(s); }
+for (const s of PLACE_SPOTS) {
+  const b = document.createElement('button'); b.textContent = s.name; b.onclick = () => goTo(s);
   placesEl.append(b);
-  L.circleMarker(gameToLatLng(x, y), { radius: 4, color: '#ffd166', weight: 1, fillOpacity: 0.8 }).bindTooltip(name).addTo(map);
+  L.circleMarker(gameToLatLng(s.x, s.y), { radius: 4, color: '#ffd166', weight: 1, fillOpacity: 0.8, bubblingMouseEvents: false })
+    .bindTooltip(esc(s.name)).on('click', () => showSpot(s)).addTo(map);
 }
 
-// Links: #x,y[,zoom][,pin][,night] centers the map on game x, y; pin also opens the teleport popup.
+// Markers and names from the community map, loaded by the browser from its site (as the tiles are).
+const DATA = CFG.data;
+const MK = { cats: [], groups: new Map(), spots: [], ready: false };
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } },
+};
+const isVehicleType = g => g.startsWith('native_vehicle_');
+let enabled = null;  // group keys shown; set once the data is in
+const mkOn = document.getElementById('mk-on'), mkCount = document.getElementById('mk-count');
+mkOn.checked = store.get('mk-on', true);
+
+async function loadMarkers() {
+  const get = async p => { const r = await fetch(DATA + p); if (!r.ok) throw new Error(p); return r.json(); };
+  const [en, ds] = await Promise.all([get('locales/en.json'), get('data/datasets.json')]);
+  const name = k => k && en[`base.${k}.name`];
+  const files = ds.datasets.map(d => d.path).filter(p => /\/native-[\w-]+\.json$/.test(p));
+  const parts = await Promise.all(files.map(p => get(p).catch(() => [])));
+  for (const arr of parts) for (const c of (Array.isArray(arr) ? arr : [])) {
+    if (!c || !Array.isArray(c.markers)) continue;
+    const cat = { key: c.key, group: c.group || 'other', icon: c.icon, name: name(c.key) || c.key, markers: [] };
+    for (const m of c.markers) {
+      if (!Number.isFinite(m.x) || !Number.isFinite(m.y)) continue;
+      const z = Number.isFinite(m.z) ? m.z : undefined;
+      // A marker sits on the floor; the player's position is about 1 m above it.
+      cat.markers.push({ x: m.x, y: m.y, z, tz: z === undefined ? undefined : z + 1, name: name(m.i18nKey) || name(m.key) || cat.name, sub: cat.name, cat });
+    }
+    MK.cats.push(cat);
+    if (!MK.groups.has(cat.group)) MK.groups.set(cat.group, { key: cat.group, name: name(cat.group) || cat.group, count: 0 });
+    MK.groups.get(cat.group).count += cat.markers.length;
+  }
+  let districts = [];
+  try {
+    for (const r of await get('data/gtavi/regions.json'))
+      for (const m of r.markers || []) if (Number.isFinite(m.x)) districts.push({ x: m.x, y: m.y, name: m.title, sub: 'District' });
+  } catch (e) { districts = []; }
+  MK.spots = [...PLACE_SPOTS, ...districts, ...MK.cats.flatMap(c => c.markers)];
+  for (const s of MK.spots) s.text = `${s.name} ${s.sub || ''}`.toLowerCase();
+  enabled = new Set(store.get('mk-groups', null) || defaultGroups());
+  MK.ready = true;
+  buildGroups(); refreshMarkers(); runSearch();
+}
+function defaultGroups() { return [...MK.groups.keys()].filter(g => !isVehicleType(g)); }
+function saveGroups() { store.set('mk-groups', [...enabled]); }
+
+const COLORS = ['#ffd166', '#06d6a0', '#4cc9f0', '#ef476f', '#f78c6b', '#83d483', '#c77dff', '#f15bb5', '#fee440', '#90be6d'];
+function groupColor(g) { let h = 0; for (const ch of g) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return COLORS[h % COLORS.length]; }
+const iconCache = {};
+function iconFor(n) { return iconCache[n] || (iconCache[n] = L.icon({ iconUrl: `${DATA}images/icons/${n}.png`, iconSize: [26, 26], iconAnchor: [13, 13] })); }
+const dots = L.canvas({ padding: 0.3 });
+const mkLayer = L.featureGroup().addTo(map);
+mkLayer.bindTooltip(l => esc(l.spot.name), { direction: 'top', offset: [0, -8] });
+mkLayer.on('click', e => showSpot(e.layer.spot));
+
+function refreshMarkers() {
+  mkLayer.clearLayers();
+  if (!MK.ready) return;
+  if (!mkOn.checked) { mkCount.textContent = 'off'; return; }
+  const b = map.getBounds().pad(0.2), zoom = map.getZoom(), vis = [];
+  for (const cat of MK.cats) if (enabled.has(cat.group)) for (const m of cat.markers) {
+    if (!m.ll) m.ll = gameToLatLng(m.x, m.y);
+    if (b.contains(m.ll)) vis.push(m);
+  }
+  const icons = zoom >= 14 && vis.length <= 400;  // pictures up close, dots when there are many
+  for (const m of vis) {
+    const l = icons && m.cat.icon
+      ? L.marker(m.ll, { icon: iconFor(m.cat.icon), keyboard: false })
+      : L.circleMarker(m.ll, { renderer: dots, radius: zoom >= 13 ? 5 : 3.5, weight: 1, color: '#111', fillColor: groupColor(m.cat.group), fillOpacity: 0.9, bubblingMouseEvents: false });
+    l.spot = m;
+    mkLayer.addLayer(l);
+  }
+  mkCount.textContent = `${vis.length} in view`;
+}
+map.on('moveend', refreshMarkers);
+mkOn.onchange = () => { store.set('mk-on', mkOn.checked); refreshMarkers(); };
+
+function buildGroups() {
+  const box = document.getElementById('mk-groups'); box.textContent = '';
+  const gs = [...MK.groups.values()].sort((a, b) => (isVehicleType(a.key) - isVehicleType(b.key)) || a.name.localeCompare(b.name));
+  for (const g of gs) {
+    const lab = document.createElement('label');
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = enabled.has(g.key);
+    cb.onchange = () => { if (cb.checked) enabled.add(g.key); else enabled.delete(g.key); saveGroups(); refreshMarkers(); };
+    const sw = document.createElement('span'); sw.className = 'swatch'; sw.style.background = groupColor(g.key);
+    const t = document.createElement('span'); t.textContent = g.name;
+    const n = document.createElement('span'); n.className = 'n'; n.textContent = g.count;
+    lab.append(cb, sw, t, n); box.append(lab);
+  }
+}
+const setGroups = keys => { if (!MK.ready) return; enabled = new Set(keys); saveGroups(); buildGroups(); refreshMarkers(); };
+document.getElementById('mk-all').onclick = () => setGroups(MK.groups.keys());
+document.getElementById('mk-none').onclick = () => setGroups([]);
+document.getElementById('mk-default').onclick = () => setGroups(defaultGroups());
+
+const searchEl = document.getElementById('search'), resultsEl = document.getElementById('results');
+let searchTimer = null;
+searchEl.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 150); });
+function runSearch() {
+  resultsEl.textContent = '';
+  const q = searchEl.value.trim().toLowerCase();
+  if (q.length < 2) return;
+  const words = q.split(/\s+/);
+  const pool = MK.ready ? MK.spots : PLACE_SPOTS.map(s => Object.assign(s, { text: s.name.toLowerCase() }));
+  const hits = pool.filter(s => words.every(w => s.text.includes(w)));
+  const rank = s => (s.cat ? 1 : 0);  // saved places and districts first
+  const dist = s => (meXY ? Math.hypot(s.x - meXY[0], s.y - meXY[1]) : 0);
+  hits.sort((a, b) => (rank(a) - rank(b)) || (dist(a) - dist(b)) || a.name.localeCompare(b.name));
+  const info = document.createElement('div'); info.className = 'muted';
+  info.textContent = hits.length > 40 ? `${hits.length} found, ${meXY ? 'nearest' : 'first'} 40 shown` : `${hits.length} found${MK.ready ? '' : ' (markers still loading)'}`;
+  resultsEl.append(info);
+  for (const s of hits.slice(0, 40)) {
+    const b = document.createElement('button');
+    b.textContent = s.name;
+    const sub = document.createElement('span'); sub.className = 'sub';
+    const d = dist(s);
+    sub.textContent = (s.sub || '') + (meXY ? ` · ${d >= 1000 ? (d / 1000).toFixed(1) + ' km' : Math.round(d) + ' m'}` : '');
+    b.append(sub);
+    b.onclick = () => goTo(s);
+    resultsEl.append(b);
+  }
+}
+loadMarkers().catch(() => { mkCount.textContent = 'markers could not be loaded'; });
+
+// Links: #x,y[,zoom][,pin][,night][,q=search] centers the map on game x, y; pin also opens the teleport popup.
 function fromHash() {
   const parts = decodeURIComponent(location.hash.slice(1)).split(',').map(t => t.trim()).filter(t => t !== '');
   const nums = parts.filter(t => !isNaN(Number(t))).map(Number);
   if (parts.includes('night')) useLayer('night');
+  const q = parts.find(t => t.startsWith('q='));
+  if (q) { searchEl.value = q.slice(2); runSearch(); }
   if (nums.length >= 2) {
     map.setView(gameToLatLng(nums[0], nums[1]), nums.length > 2 ? nums[2] : 16);
     if (parts.includes('pin')) showPick(nums[0], nums[1]);
@@ -168,7 +327,7 @@ window.addEventListener('hashchange', fromHash);
 const meIcon = L.divIcon({ className: 'me', iconSize: [26, 26], iconAnchor: [13, 13],
   html: '<svg viewBox="0 0 26 26"><circle cx="13" cy="13" r="11" fill="#1d2029" stroke="#fff" stroke-width="2"/><path d="M13 4 L19 19 L13 15.5 L7 19 Z" fill="#ff5fa2"/></svg>' });
 const me = L.marker([0, 0], { icon: meIcon, interactive: false, zIndexOffset: 1000 });
-let mePos = null;
+let mePos = null, meXY = null;
 const stateEl = document.getElementById('state'), meEl = document.getElementById('me');
 async function poll() {
   try {
@@ -176,7 +335,7 @@ async function poll() {
     stateEl.textContent = s.demo ? 'demo (no game)' : s.live ? 'running' : 'not running';
     stateEl.className = s.live ? 'live' : 'dead';
     if (s.x !== undefined && s.y !== undefined) {
-      mePos = gameToLatLng(s.x, s.y);
+      mePos = gameToLatLng(s.x, s.y); meXY = [s.x, s.y];
       me.setLatLng(mePos).addTo(map);
       const svg = me.getElement() && me.getElement().querySelector('svg');
       if (svg && s.heading_deg !== undefined) svg.style.transform = `rotate(${-s.heading_deg}deg)`;
